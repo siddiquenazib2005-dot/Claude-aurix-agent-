@@ -18,7 +18,13 @@ package com.jarvis.ai.service
  */
 object WakeWordDetector {
 
-    /** Primary phrase plus transcription variants seen in the wild. */
+    /**
+     * Phase-1 canonical phrase: HEY JARVIS (ONNX engine model).
+     * "aurix/orix/aurex" stay as legacy aliases so older transcripts and
+     * existing tests keep working — the engine phrase itself is HEY JARVIS
+     * (see WakeWordConfig.DEFAULT). New code must not add more aliases here;
+     * tune the engine threshold instead of widening this list.
+     */
     private val WAKE_WORDS = listOf(
         "aurix", "orix", "aurex", "jarvis", "javis", "jarves", "jervis", "jarvic", "jarwis", "jarviz", "jervaz"
     )
@@ -45,8 +51,14 @@ object WakeWordDetector {
             .trim()
             // A wake word spoken with trailing punctuation ("jarvis, status")
             // leaves the separator behind; strip leading punctuation AND the
-            // whitespace after it, then settle the ends.
-            .trimStart(',', '.', '!', '?', ':', ';', '-', '—')
+            // whitespace after it, then settle the ends. Phase-1: also drop a
+            // leading "hey" left behind by "hey jarvis open whatsapp", and
+            // repeat the trim so "..." runs fully collapse instead of once.
+            .trimStart(',', '.', '!', '?', ':', ';', '-', '—', '.', '…')
+            .trim()
+            .removePrefix("hey ")
+            .removePrefix("hey, ")
+            .trimStart(',', '.', '!', '?', ':', ';', '-', '—', '.', '…')
             .trim()
             .ifEmpty { null }
     }

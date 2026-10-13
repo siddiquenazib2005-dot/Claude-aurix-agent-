@@ -56,12 +56,12 @@ object IntentClassifier {
     private val MESSAGING_TRIGGER_WORDS = listOf("sms", "whatsapp", "text ", "message ", "bata do", "bhej do")
 
     /** Regexes tried in order; first match wins. Groups vary per pattern, handled in parseMessagingRequest. */
-    private val MSG_PATTERN_TO = Regex("""^(?:send\s+)?(sms|whatsapp)\s+to\s+(\S+)\s+(.+)$""")
-    private val MSG_PATTERN_DIRECT = Regex("""^(sms|whatsapp)\s+(\S+)\s+(.+)$""")
-    private val MSG_PATTERN_TEXT = Regex("""^text\s+(\S+)\s+(.+)$""")
-    private val MSG_PATTERN_MESSAGE = Regex("""^message\s+(\S+)\s+(?:saying\s+)?(.+)$""")
+    private val MSG_PATTERN_TO = Regex("""^(?:send\s+)?(sms|whatsapp)\s+to\s+(.+)$""")
+    private val MSG_PATTERN_DIRECT = Regex("""^(sms|whatsapp)\s+(.+)$""")
+    private val MSG_PATTERN_TEXT = Regex("""^text\s+(.+)$""")
+    private val MSG_PATTERN_MESSAGE = Regex("""^message\s+(?:saying\s+)?(.+)$""")
     /** Hinglish: "NAZIB ko whatsapp karo hii" / "ritik ko sms bhejo call me" */
-    private val MSG_PATTERN_KO = Regex("""^(\S+)\s+ko\s+(sms|whatsapp)\s+(?:karo\s+|bhejo\s+|bolo\s+)?(.+)$""")
+    private val MSG_PATTERN_KO = Regex("""^(.+?)\s+ko\s+(sms|whatsapp)\s+(?:karo\s+|bhejo\s+|bolo\s+)?(.+)$""")
     /**
      * Hinglish without a stated channel: "nazib ko bata do main late hu" /
      * "ritik ko bhej do ..." — the speaker means a message. Falls back to sms
@@ -69,7 +69,12 @@ object IntentClassifier {
      * Send verbs must stay anchored to the end of the command, otherwise a
      * trailing "karo" would swallow the message text.
      */
-    private val MSG_PATTERN_KO_PLAIN = Regex("""^(\S+)\s+ko\s+(?:bata\s+do|bhej\s+do|bol\s+do|batao|bhejo)\s+(.+)$""")
+    private val MSG_PATTERN_KO_PLAIN = Regex("""^(.+?)\s+ko\s+(?:bata\s+do|bhej\s+do|bol\s+do|batao|bhejo)\s+(.+)$""")
+
+    /** Markers splitting "contact ... message" inside a tail (multi-word contacts). */
+    private val BODY_MARKERS = listOf(
+        " saying ", " bolo ", " bhejo ", " bhej do ", " bata do ", " that ", " message ", " msg "
+    )
 
     // ------------------------------------------------------------------
     // Phone calls
@@ -77,8 +82,13 @@ object IntentClassifier {
 
     private val CALL_TRIGGER_WORDS = listOf("call ", "phone ", "ring ", "dial ")
     private val CALL_PATTERN_DIRECT = Regex("""^(?:call|phone|ring|dial)\s+(.+)$""")
-    /** Hinglish: "NAZIB ko call karo" / "ritik ko phone lagao" */
-    private val CALL_PATTERN_KO = Regex("""^(.+?)\s+ko\s+(?:call|phone)\s+(?:karo|lagao|milao)?$""")
+    /**
+     * Phase-1: Hinglish "NAZIB ko call karo" / "ritik ko phone lagao".
+     * Old pattern anchored `$` right after karo/lagao/milao, so any trailing
+     * word ("...karo please") failed and fell to CHAT. Trailing speech is now
+     * accepted and ignored — a call has no message body.
+     */
+    private val CALL_PATTERN_KO = Regex("""^(.+?)\s+ko\s+(?:call|phone)\s+(?:karo|lagao|milao)?.*$""")
 
     /** Classifies a user request intent. */
     fun classifyIntent(request: String, context: Map<String, Any?> = emptyMap()): Classification {
@@ -239,20 +249,56 @@ object IntentClassifier {
         return isQuestion && !isCalculationRequest(text) && !isSystemCommand(text)
     }
 
-    private fun isMessagingRequest(text: String): Boolean =
-        containsAny(text, MESSAGING_TRIGGER_WORDS) && (text.contains(" to ") || text.contains(" ko "))
+    private fun isMessagingRequest(text: String): Boolean {
+        if (!containsAny(text, MESSAGING_TRIGGER_WORDS)) return false
+        // Phase-1: direct phrasings ("whatsapp rahul hi", "text mom hello")
+        // carry no "to"/"ko" — requiring them hid MSG_PATTERN_DIRECT/TEXT/
+        // MESSAGE forever. Accept channel-led starts as well.
+        return text.contains(" to ") || text.contains(" ko ") ||
+            text.startsWith("sms ") || text.startsWith("whatsapp ") ||
+            text.startsWith("text ") || text.startsWith("message ")
+    }
 
     private fun isCallRequest(text: String): Boolean = containsAny(text, CALL_TRIGGER_WORDS)
 
     /** Extracts the contact name/number from a call command; null if the phrasing doesn't match. */
     private fun parseCallRequest(text: String): String? {
         CALL_PATTERN_DIRECT.find(text)?.let { m ->
-            return m.groupValues[1].trim().removePrefix("to ").trim()
+            // Phase-1: "call mom please" / "call to mom" — strip polite tails.
+            val raw = m.groupValues[1].trim().removePrefix("to ").trim()
+                .removeSuffix("please").trim()
+            return raw.ifEmpty { null }
         }
         CALL_PATTERN_KO.find(text)?.let { m ->
-            return m.groupValues[1].trim()
+            return m.groupValues[1].trim().ifEmpty { null }
         }
         return null
+    }
+
+    /**
+     * Splits "contact ... message" tails so multi-word contacts ("my mom",
+     * "boss madam") survive. Explicit markers win ("saying", "bolo"...);
+     * otherwise the first 1-2 words are the contact (matches
+     * QuickCommandRouter.parseMessage's heuristic for the forced-local path).
+     */
+    private fun splitContactMessage(tail: String): Pair<String, String>? {
+        val t = tail.trim()
+        if (t.isEmpty()) return null
+        for (marker in BODY_MARKERS) {
+            val idx = t.indexOf(marker)
+            if (idx > 0) {
+                val contact = t.substring(0, idx).trim()
+                val message = t.substring(idx + marker.length).trim()
+                if (contact.isNotEmpty() && message.isNotEmpty()) return contact to message
+            }
+        }
+        val words = t.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (words.size < 2) return null
+        return if (words.size >= 3) {
+            words.take(2).joinToString(" ") to words.drop(2).joinToString(" ")
+        } else {
+            words.first() to words.drop(1).joinToString(" ")
+        }
     }
 
     /**
@@ -263,30 +309,44 @@ object IntentClassifier {
      */
     private fun parseMessagingRequest(text: String): Triple<String, String, String>? {
         MSG_PATTERN_TO.find(text)?.let { m ->
-            val (type, contact, message) = m.destructured
-            return Triple(type, contact, message.trim())
+            val type = m.groupValues[1]
+            val tail = m.groupValues[2]
+            splitContactMessage(tail)?.let { (contact, message) ->
+                return Triple(type, contact, message)
+            }
+            return null
         }
         MSG_PATTERN_DIRECT.find(text)?.let { m ->
-            val (type, contact, message) = m.destructured
-            return Triple(type, contact, message.trim())
+            val type = m.groupValues[1]
+            val tail = m.groupValues[2]
+            splitContactMessage(tail)?.let { (contact, message) ->
+                return Triple(type, contact, message)
+            }
+            return null
         }
         MSG_PATTERN_KO.find(text)?.let { m ->
-            val (contact, type, message) = m.destructured
-            return Triple(type, contact, message.trim())
+            val contact = m.groupValues[1].trim()
+            val type = m.groupValues[2]
+            val message = m.groupValues[3].trim()
+            if (contact.isNotEmpty() && message.isNotEmpty()) return Triple(type, contact, message)
         }
         MSG_PATTERN_KO_PLAIN.find(text)?.let { m ->
             val (contact, message) = m.destructured
             // Channel was not named, so default to SMS. The user still gets an
             // explicit confirmation (SEND_SMS is needsConfirmation = true).
-            return Triple("sms", contact, message.trim())
+            if (contact.trim().isNotEmpty() && message.trim().isNotEmpty()) {
+                return Triple("sms", contact.trim(), message.trim())
+            }
         }
         MSG_PATTERN_TEXT.find(text)?.let { m ->
-            val (contact, message) = m.destructured
-            return Triple("sms", contact, message.trim())
+            splitContactMessage(m.groupValues[1])?.let { (contact, message) ->
+                return Triple("sms", contact, message)
+            }
         }
         MSG_PATTERN_MESSAGE.find(text)?.let { m ->
-            val (contact, message) = m.destructured
-            return Triple("sms", contact, message.trim())
+            splitContactMessage(m.groupValues[1])?.let { (contact, message) ->
+                return Triple("sms", contact, message)
+            }
         }
         return null
     }

@@ -1,16 +1,12 @@
 package com.jarvis.ai.service
 
 import android.content.Context
-import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.sin
 
 class TtsEngine(context: Context) {
 
@@ -120,11 +116,14 @@ class TtsEngine(context: Context) {
 
     // Derived envelope synchronized via onRange progress; TTS output cannot feed an AnalyserNode.
     // TTS callbacks arrive on binder threads; MutableStateFlow writes are atomic and safe there.
+    // Phase-1: the envelope is a SPEAKING-STATE flag (0.25 while voicing, 0
+    // otherwise), not a live waveform — onRangeStart waveform synthesis was
+    // dead code (ENVELOPE_AMPLITUDE/PULSES/edgeFade never wired) and is
+    // removed so the orb doesn't pretend to be audio-reactive.
     private val progressListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
             _isSpeaking.value = true
             _envelope.value = ENVELOPE_BASE
-            speakingStartMs = SystemClock.elapsedRealtime()
         }
 
         override fun onDone(utteranceId: String?) {
@@ -140,14 +139,6 @@ class TtsEngine(context: Context) {
         }
     }
 
-    private var speakingStartMs: Long = 0
-
-    private fun edgeFade(progress: Float): Float {
-        val fadeIn = (progress / ENVELOPE_FADE_FRACTION).coerceIn(0f, 1f)
-        val fadeOut = ((1f - progress) / ENVELOPE_FADE_FRACTION).coerceIn(0f, 1f)
-        return minOf(fadeIn, fadeOut)
-    }
-
     private fun resetPlayback() {
         _envelope.value = 0f
         _isSpeaking.value = false
@@ -158,9 +149,6 @@ class TtsEngine(context: Context) {
         const val RATE = 1.05f
         const val UTTERANCE_ID_REPLY = "aurix_reply"
         const val ENVELOPE_BASE = 0.25f
-        const val ENVELOPE_AMPLITUDE = 0.55f
-        const val ENVELOPE_PULSES = 7
-        const val ENVELOPE_FADE_FRACTION = 0.05f
         const val DEFAULT_MAX_SPEECH_INPUT_LENGTH = 4000
 
         val FENCED_CODE_BLOCK = Regex("```[\\s\\S]*?```")

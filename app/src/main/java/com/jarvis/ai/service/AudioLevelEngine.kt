@@ -15,6 +15,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.sqrt
 
+/**
+ * Microphone level meter for orb visualization.
+ *
+ * Phase-1 single-mic rule: this engine opens its own AudioRecord, so it must
+ * NEVER run concurrently with SpeechRecognizer (chat STT) or the wake-word
+ * provider — three live captures fight for the mic and the oldest starves.
+ * It stays stopped unless a future caller explicitly starts it while
+ * VoiceSessionGate is free, and every start must be paired with stop().
+ * Today no caller starts it (orb uses the TTS speaking flag instead), which
+ * avoids contention by design rather than by accident.
+ */
 class AudioLevelEngine(private val context: Context) {
 
     private val _level = MutableStateFlow(0f)

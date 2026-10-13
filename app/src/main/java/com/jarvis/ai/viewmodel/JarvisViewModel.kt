@@ -183,6 +183,11 @@ class JarvisViewModel(
     init {
         RoutingPrefs.init(appContext)
         BackendPrefs.init(appContext)
+        // Phase-1: wake-word toggle survives process death (was in-memory only,
+        // resetting every restart). Stored in private prefs, no backup needed.
+        _wakeWordEnabled.value = appContext
+            .getSharedPreferences(VOICE_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_WAKE_WORD_ENABLED, false)
 
         // Item 4: screen gestures run fire-and-forget on a background scope,
         // so their real outcome arrives late. When one genuinely fails after
@@ -266,9 +271,13 @@ class JarvisViewModel(
 
         // Proactive intelligence: one evaluation per minute while foregrounded;
         // ProactiveEngine itself enforces anti-spam intervals.
+        // Phase-1: background ticks must never speak or steal the mic — the
+        // appForeground collector already ends listening off-screen, but this
+        // loop ran unconditionally and could tts.speak() while hidden.
         viewModelScope.launch(crashSafe) {
             while (isActive) {
                 delay(PROACTIVE_POLL_MS)
+                if (!runtime.appForeground.value) continue
                 runCatching {
                     val snap = awareness.snapshot()
                     proactive.evaluate(snap)?.let { message ->
@@ -284,7 +293,7 @@ class JarvisViewModel(
         viewModelScope.launch(crashSafe) {
             var pending = sentenceParser.flush() // flush any leftover from previous session
             if (pending.isNotBlank()) {
-                ttsQueue.value = pending
+                enqueueTts(pending)
             }
             while (isActive) {
                 val toSpeak = ttsQueue.value
@@ -401,7 +410,7 @@ class JarvisViewModel(
                 if (finalText.isEmpty()) {
                     throw IllegalStateException("Backend returned no content.")
                 }
-                ttsQueue.value = finalText
+                enqueueTts(finalText)
                 _uiState.update { it.copy(isLoading = false) }
                 withContext(NonCancellable + Dispatchers.IO) {
                     db.appendMessage(
@@ -439,7 +448,7 @@ class JarvisViewModel(
                 latency = LatencyInfo()
             )
         }
-        ttsQueue.value = reply
+        enqueueTts(reply)
         viewModelScope.launch(Dispatchers.IO + crashSafe) {
             db.appendMessage(sessionId, userMessage)
             db.appendMessage(sessionId, replyMessage)
@@ -479,7 +488,7 @@ class JarvisViewModel(
             _uiState.update {
                 it.copy(messages = it.messages + replyMessage, isLoading = false)
             }
-            ttsQueue.value = reply
+            enqueueTts(reply)
             withContext(Dispatchers.IO) {
                 db.appendMessage(sessionId, userMessage)
                 db.appendMessage(sessionId, replyMessage)
@@ -573,7 +582,7 @@ class JarvisViewModel(
     ) {
         val replyMessage = Message(sender = Sender.AURIX, text = reply)
         _uiState.update { it.copy(messages = it.messages + replyMessage, isLoading = false, isActing = false) }
-        ttsQueue.value = reply
+        enqueueTts(reply)
         withContext(Dispatchers.IO) {
             db.appendMessage(sessionId, userMessage)
             db.appendMessage(sessionId, replyMessage)
@@ -689,7 +698,7 @@ class JarvisViewModel(
                         isActing = false
                     )
                 }
-                ttsQueue.value = clean
+                enqueueTts(clean)
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 throw ce
             } catch (e: Exception) {
@@ -824,7 +833,7 @@ class JarvisViewModel(
                             val sentence = sentenceParser.nextSentence()
                             if (sentence?.isNotBlank() == true) {
                                 fullText.append(sentence).append(" ")
-                                ttsQueue.value = sentence
+                                enqueueTts(sentence)
                             }
                             if (!started) {
                                 started = true
@@ -877,7 +886,7 @@ class JarvisViewModel(
                             val remaining = sentenceParser.flush()
                             if (remaining.isNotBlank()) {
                                 fullText.append(remaining).append(" ")
-                                ttsQueue.value = remaining.trim()
+                                enqueueTts(remaining.trim())
                                 // Persist the flushed tail into the live bubble.
                                 // Without this the final sentence is spoken but the
                                 // displayed/persisted reply ends early (truncation).
@@ -915,7 +924,7 @@ class JarvisViewModel(
                 val remaining = sentenceParser.flush()
                 if (remaining.isNotBlank()) {
                     fullText.append(remaining).append(" ")
-                    ttsQueue.value = remaining.trim()
+                    enqueueTts(remaining.trim())
                     // Write the flushed tail into the live bubble.
                     updateReply(replyId, fullText.toString().trim())
                 }
@@ -926,7 +935,7 @@ class JarvisViewModel(
                 if (currentQueue == null || currentQueue.isBlank()) {
                     val text = fullText.toString().trim()
                     if (text.isNotBlank()) {
-                        ttsQueue.value = text
+                        enqueueTts(text)
                     }
                 }
 
@@ -1240,6 +1249,10 @@ class JarvisViewModel(
      */
     fun setWakeWordEnabled(enabled: Boolean) {
         _wakeWordEnabled.value = enabled
+        runCatching {
+            appContext.getSharedPreferences(VOICE_PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_WAKE_WORD_ENABLED, enabled).apply()
+        }
     }
 
     /**
@@ -1443,7 +1456,7 @@ class JarvisViewModel(
             // Route through the sentence queue so hands-free re-arms once the
             // announcement finishes speaking (exactly-once consumption).
             handsFreeVoicing = true
-            ttsQueue.value = message
+            enqueueTts(message)
         }
     }
 
@@ -1474,6 +1487,19 @@ class JarvisViewModel(
 
     private fun setNotice(text: String) {
         _uiState.update { it.copy(notice = text) }
+    }
+
+    /**
+     * Phase-1: ttsQueue was a single last-writer-wins slot — an LLM sentence
+     * arriving while a proactive announce() was queued silently dropped the
+     * first text. Appends instead so nothing is lost; the consumer speaks the
+     * whole string exactly once.
+     */
+    private fun enqueueTts(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val current = ttsQueue.value?.trim().orEmpty()
+        ttsQueue.value = if (current.isEmpty()) clean else "$current $clean"
     }
 
     fun clearNotice() {
@@ -1517,6 +1543,8 @@ class JarvisViewModel(
         private const val LISTENING_PREFIX = "Listening · "
         private const val PROACTIVE_POLL_MS = 60_000L
         private const val HANDS_FREE_REARM_DELAY_MS = 1_200L
+        private const val VOICE_PREFS = "aurix_voice"
+        private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
         private const val HANDS_FREE_MAX_IDLE_RESTARTS = 3
         /** Wake-word misses tolerated before hands-free backs off. */
         private const val WAKE_WORD_MAX_MISSES = 2
