@@ -73,7 +73,7 @@ class ToolExecutor(private val context: Context) {
             // decides whether the user is asked or told.
             gate.requiresConfirmation -> ToolResult.ConfirmationRequired(
                 toolName = toolName,
-                message = gate.message
+                message = confirmationMessage(toolName, parameters, gate.message)
             )
             gate.denied -> ToolResult.Failure(
                 toolName = toolName,
@@ -104,6 +104,44 @@ class ToolExecutor(private val context: Context) {
                 }
                 result
             }
+        }
+    }
+
+    /**
+     * Phase-0: blind confirmations ("shall I proceed?") let a user approve an
+     * SMS/call/URL without seeing the payload. Every confirmation now echoes
+     * the exact recipient / number / URL / message snippet so "yes" means
+     * something. Message text is truncated to 120 chars for the prompt.
+     */
+    private fun confirmationMessage(
+        toolName: String,
+        parameters: Map<String, Any?>,
+        baseMessage: String
+    ): String {
+        fun recipient(): String =
+            (parameters["contact"] as? String)
+                ?: (parameters["phoneNumber"] as? String)
+                ?: (parameters["to"] as? String)
+                ?: (parameters["email"] as? String)
+                ?: "unknown recipient"
+
+        fun messageSnippet(): String {
+            val raw = (parameters["message"] as? String)
+                ?: (parameters["body"] as? String)
+                ?: return ""
+            return if (raw.length <= 120) raw else raw.take(120) + "…"
+        }
+
+        return when (toolName.lowercase()) {
+            "send_sms" -> "Send SMS to ${recipient()} — \"${messageSnippet()}\". Say the same command again to confirm, sir."
+            "send_whatsapp" -> "Send WhatsApp to ${recipient()} — \"${messageSnippet()}\". Say the same command again to confirm, sir."
+            "call_contact" -> "Call ${recipient()} (${(parameters["phoneNumber"] as? String).orEmpty()})? Say the same command again to confirm, sir."
+            "send_email" -> {
+                val subject = (parameters["subject"] as? String).orEmpty().ifBlank { "(no subject)" }
+                "Send email to ${recipient()} subject \"$subject\" — \"${messageSnippet()}\". Say the same command again to confirm, sir."
+            }
+            "open_url" -> "Open URL ${(parameters["url"] as? String).orEmpty()}? Say the same command again to confirm, sir."
+            else -> baseMessage
         }
     }
 
@@ -501,7 +539,8 @@ class ToolExecutor(private val context: Context) {
                 error = "Could not resolve a phone number for the recipient",
                 recoverable = false
             )
-        val digitsOnly = rawNumber.filter { it.isDigit() || it == '+' }
+        // wa.me requires digits only — a leading '+' breaks the deep link.
+        val digitsOnly = rawNumber.filter { it.isDigit() }
         if (digitsOnly.length < 8) {
             return ToolResult.Failure(
                 toolName = "send_whatsapp",
@@ -692,9 +731,27 @@ object PlanApprovalPolicy {
         return steps.mapIndexedNotNull { index, step ->
             val decision = com.jarvis.ai.security.PermissionGate.decide(step.toolName)
             if (decision.requiresConfirmation) {
-                PlanApprovalRequest(index, step.toolName, decision.message)
+                PlanApprovalRequest(index, step.toolName, describeStep(step, decision.message))
             } else null
         }.firstOrNull()
+    }
+
+    private fun describeStep(step: PlanStep, base: String): String {
+        val p = step.parameters
+        fun snippet(): String {
+            val raw = (p["message"] as? String) ?: (p["body"] as? String) ?: return ""
+            return if (raw.length <= 120) raw else raw.take(120) + "…"
+        }
+        val who = (p["contact"] as? String) ?: (p["phoneNumber"] as? String)
+            ?: (p["to"] as? String) ?: (p["email"] as? String)
+        return when (step.toolName.lowercase()) {
+            "send_sms" -> "Step ${step.toolName} to ${who ?: "unknown"} — \"${snippet()}\". Confirm the full plan before anything runs, sir."
+            "send_whatsapp" -> "Step ${step.toolName} to ${who ?: "unknown"} — \"${snippet()}\". Confirm the full plan before anything runs, sir."
+            "call_contact" -> "Step ${step.toolName} to ${who ?: "unknown"}? Confirm the full plan before anything runs, sir."
+            "send_email" -> "Step ${step.toolName} to ${who ?: "unknown"} — \"${snippet()}\". Confirm the full plan before anything runs, sir."
+            "open_url" -> "Step ${step.toolName} ${(p["url"] as? String).orEmpty()}? Confirm the full plan before anything runs, sir."
+            else -> base
+        }
     }
 }
 

@@ -135,8 +135,15 @@ class MissionEngine(private val context: Context) {
     // ------------------------------------------------------------------
 
     /** Runs a mission by name, or handles run-mission pause/resume/cancel/status. */
-    fun run(name: String): String {
-        val requested = name.trim()
+    fun run(name: String, confirmed: Boolean = false): String {
+        var requested = name.trim()
+        // Explicit confirmation gesture: repeating the run with a trailing
+        // "confirmed" approves communication steps for this run only.
+        var explicitConfirm = confirmed
+        if (requested.lowercase().endsWith(" confirmed")) {
+            explicitConfirm = true
+            requested = requested.dropLast(" confirmed".length).trim()
+        }
         when (requested.lowercase()) {
             "pause", "pause current", "pause current mission" -> return pause()
             "resume", "continue", "resume current", "resume current mission" -> return resume()
@@ -147,13 +154,23 @@ class MissionEngine(private val context: Context) {
         val mission = all().firstOrNull { it.name.equals(requested, ignoreCase = true) }
             ?: all().firstOrNull { it.name.contains(requested, ignoreCase = true) }
             ?: return "I don't have a mission called \"$requested\", sir. Say \"list missions\" to see what's saved."
+        // Phase-0: a saved/scheduled mission must never auto-send messages or
+        // place calls. Communication steps need an explicit per-run confirm.
+        if (!explicitConfirm && containsCommunication(mission.steps)) {
+            return "Mission \"${mission.name}\" will send messages or call (${describeCommunication(mission.steps)}). " +
+                "Say \"run mission ${mission.name} confirmed\" to proceed, sir. Scheduled runs never send on their own."
+        }
         return launchMission(mission.name, mission.steps)
     }
 
     /** Runs an ad-hoc chain such as "flashlight on, then volume 30". */
-    fun runChain(rawSteps: List<String>): String {
+    fun runChain(rawSteps: List<String>, confirmed: Boolean = false): String {
         val steps = rawSteps.mapNotNull { parseStep(it) }
         if (steps.isEmpty()) return "I couldn't understand those steps, sir."
+        if (!confirmed && containsCommunication(steps)) {
+            return "That chain will send messages or call (${describeCommunication(steps)}). " +
+                "Repeat it with \"confirmed\" at the end to proceed, sir."
+        }
         return launchMission("Ad-hoc chain", steps)
     }
 
@@ -418,6 +435,7 @@ class MissionEngine(private val context: Context) {
             text.contains("flashlight on") || text.contains("torch on") -> MissionStep("torch_on")
             text.contains("flashlight off") || text.contains("torch off") -> MissionStep("torch_off")
             text.contains("volume") -> MissionStep("volume", Regex("\\d{1,3}").find(text)?.value.orEmpty())
+            text.contains("unmute") -> MissionStep("unmute")
             text.contains("mute") -> MissionStep("mute")
             text.contains("battery") -> MissionStep("battery")
             text.contains("camera") -> MissionStep("camera")
@@ -443,6 +461,15 @@ class MissionEngine(private val context: Context) {
                 }
         } + "\n\nSay \"run mission <name>\" to start one. While it runs, use \"run mission pause\", \"resume\", \"status\" or \"cancel\"."
     }
+
+    private fun containsCommunication(steps: List<MissionStep>): Boolean =
+        steps.any { it.action.lowercase() in Companion.COMMUNICATION_ACTIONS }
+
+    private fun describeCommunication(steps: List<MissionStep>): String =
+        steps.filter { it.action.lowercase() in Companion.COMMUNICATION_ACTIONS }
+            .joinToString(", ") { step ->
+                if (step.argument.isBlank()) step.action else "${step.action} ${step.argument.take(60)}"
+            }
 
     private fun defaults(): List<Mission> = listOf(
         Mission(
@@ -489,6 +516,13 @@ class MissionEngine(private val context: Context) {
         private val RETRYABLE_VERBS = setOf(
             "battery", "device_status", "read_screen", "wait"
         )
+
+        /**
+         * Phase-0: steps with external side effects. Missions containing any
+         * of these need an explicit per-run "confirmed" before launch, and
+         * scheduled alarm runs (which never pass confirmed=true) refuse them.
+         */
+        val COMMUNICATION_ACTIONS = setOf("whatsapp", "sms", "call")
 
         private val runtimeLock = Any()
         private val runtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

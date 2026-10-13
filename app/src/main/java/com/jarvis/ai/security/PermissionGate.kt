@@ -38,7 +38,10 @@ private val map: Map<String, PermissionLevel> = buildMap {
         put("space_apod", PermissionLevel.READ_ONLY)
         put("memory_read", PermissionLevel.READ_ONLY)
         put("memory_write", PermissionLevel.LOW_RISK)
-        put("open_url", PermissionLevel.READ_ONLY)
+        // Phase-0: opening an arbitrary URL can exfiltrate data via phishing /
+        // tracking links when driven by an LLM tool-call. It must never
+        // auto-fire — the user confirms the exact URL first.
+        put("open_url", PermissionLevel.CONFIRM_REQUIRED)
         put("open_app", PermissionLevel.LOW_RISK)
         put("open_settings", PermissionLevel.LOW_RISK)
         put("memory_delete", PermissionLevel.CONFIRM_REQUIRED)

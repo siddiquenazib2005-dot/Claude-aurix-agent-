@@ -178,14 +178,14 @@ export function isPrivateAddress(ip) {
 	return true // not parseable -> treat as unsafe
 }
 
-function assertPublicHost(hostname) {
+async function assertPublicHost(hostname) {
 	const host = hostname.replace(/^\[|\]$/g, '')
 	if (net.isIP(host)) {
 		if (isPrivateAddress(host)) throw new Error('blocked: private/reserved address ' + host)
 		return
 	}
 	if (!host.includes('.')) throw new Error('blocked: hostname without dot')
-	throwIpIfPrivate(host)
+	await throwIpIfPrivate(host)
 }
 
 async function throwIpIfPrivate(hostname) {

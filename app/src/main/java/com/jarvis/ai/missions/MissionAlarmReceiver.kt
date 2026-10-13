@@ -22,6 +22,8 @@ class MissionAlarmReceiver : BroadcastReceiver() {
         val ctx = context ?: return
         if (intent?.action != ACTION_RUN) return
         val name = intent.getStringExtra(EXTRA_MISSION)?.takeIf { it.isNotBlank() } ?: return
+        // Phase-0: scheduled runs never pass confirmed=true, so missions
+        // containing whatsapp/sms/call refuse here instead of auto-sending.
         runCatching { MissionEngine(ctx.applicationContext).run(name) }
             .onFailure { DiagnosticsLog.record("mission", "trigger failed for \"$name\": ${it.message?.take(120)}") }
         runCatching {

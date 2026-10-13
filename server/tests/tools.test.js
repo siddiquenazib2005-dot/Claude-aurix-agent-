@@ -8,7 +8,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env.AURIX_TOOLS = 'on'
-const { evaluateExpression, extractToolCall, isPrivateAddress, runTool } = await import('../src/tools.js')
+const { evaluateExpression, extractToolCall, isPrivateAddress, assertPublicUrl, runTool } = await import('../src/tools.js')
 
 // ---------------------------------------------------------------------------
 // calculator parser
@@ -66,6 +66,21 @@ test('isPrivateAddress: ipv6 private ranges', () => {
 	// IPv4-mapped must be judged by the embedded v4 address
 	assert.equal(isPrivateAddress('::ffff:127.0.0.1'), true)
 	assert.equal(isPrivateAddress('::ffff:8.8.8.8'), false)
+})
+
+test('assertPublicUrl: blocks private IPs, userinfo, protocol and dotless hosts without network', async () => {
+	// Direct private IPs must throw (no DNS needed)
+	await assert.rejects(() => assertPublicUrl('http://127.0.0.1/'), /private\/reserved/)
+	await assert.rejects(() => assertPublicUrl('http://10.0.0.5/x'), /private\/reserved/)
+	await assert.rejects(() => assertPublicUrl('http://169.254.169.254/'), /private\/reserved/)
+	// userinfo / protocol / dotless must throw before any DNS
+	await assert.rejects(() => assertPublicUrl('http://user:pass@example.com/'), /userinfo/)
+	await assert.rejects(() => assertPublicUrl('ftp://example.com/'), /only http\/https/)
+	await assert.rejects(() => assertPublicUrl('http://localhost/'), /without dot/)
+	await assert.rejects(() => assertPublicUrl('not a url'), /invalid URL/)
+	// Public IP literal passes the guard (fetch itself is not attempted here)
+	const url = await assertPublicUrl('https://8.8.8.8/')
+	assert.equal(url.hostname, '8.8.8.8')
 })
 
 // ---------------------------------------------------------------------------
