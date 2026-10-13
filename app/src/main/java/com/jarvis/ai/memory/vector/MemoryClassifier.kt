@@ -62,13 +62,17 @@ class MemoryClassifier {
     /** True when content looks like it contains credentials — such text is never stored. */
     fun containsSecret(content: String): Boolean =
         listOf(
-            Regex("sk-or-v1-[A-Za-z0-9]{8,}"),
-            Regex("gsk_[A-Za-z0-9]{8,}"),
-            Regex("csk-[A-Za-z0-9]{8,}"),
-            Regex("tvly-[A-Za-z0-9\\-]{8,}"),
-            Regex("pcsk_[A-Za-z0-9_\\-]{8,}"),
-            Regex("eyJ[A-Za-z0-9._\\-]{20,}"),          // JWT / Qdrant key
-            Regex("(?i)(api[_-]?key|secret|password)\\s*[:=]\\s*\\S{6,}")
+            Regex("sk-or-v1-[A-Za-z0-9]{8,}"),                              // OpenAI
+            Regex("gsk_[A-Za-z0-9]{8,}"),                                  // Hugging Face
+            Regex("csk-[A-Za-z0-9]{8,}"),                                  // Cohere
+            Regex("tvly-[A-Za-z0-9\\-]{8,}"),                              // Tavily
+            Regex("pcsk_[A-Za-z0-9_\\-]{8,}"),                             // Pinecone
+            Regex("eyJ[A-Za-z0-9._\\-]{20,}"),                             // JWT / Qdrant
+            Regex("akid_[A-Za-z0-9\\-]{20,}"),                              // Azure AD client
+            Regex("aria_[A-Za-z0-9\\-]{20,}"),                              // AWS Bedrock
+            Regex("AIza[A-Za-z0-9\\-_]{35,}"),                              // Google API key
+            Regex("(?i)(api[_-]?key|secret|password|auth|token)\\s*[:=]\\s*\\S{6,}"),
+            Regex("(?i)(bearer|authorization)\\s+[A-Za-z0-9\\-\\.\\_]+")
         ).any { it.containsMatchIn(content) }
 
     companion object {

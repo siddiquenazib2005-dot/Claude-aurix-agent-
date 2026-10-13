@@ -218,9 +218,9 @@ class VectorMemoryManager(
     ): String {
         val hits = recall(query, projectId, MemoryFilter(), fallbackStore)
         if (hits.isEmpty()) return ""
-        return "Relevant memory:\n" + hits.joinToString("\n") { m ->
+        return "<memory>\n" + hits.joinToString("\n") { m ->
             "- [${m.record.metadata.memoryType.name.lowercase()}] ${m.record.content.take(220)}"
-        }
+        } + "\n</memory>"
     }
 
     suspend fun updateMemory(
@@ -269,7 +269,7 @@ class VectorMemoryManager(
         executeAcrossStores("delete", { it.delete(ns, memoryId) }, Unit)
     }
 
-    /** User-controlled bulk deletion scoped by project/type — privacy first. */
+/** User-controlled bulk deletion scoped by project/type — privacy first. */
     suspend fun forgetFilter(
         filter: MemoryFilter,
         projectId: String? = null,
@@ -282,10 +282,26 @@ class VectorMemoryManager(
         }
     }
 
+    /** Delete ALL memories for a project — emergency privacy wipe. */
     suspend fun wipeAll(
         projectId: String? = null,
         fallbackStore: VectorStore = localStore
-    ): Int = forgetFilter(MemoryFilter(), projectId, fallbackStore)
+    ): Int = withContext(Dispatchers.IO) {
+        val ns = namespace(projectId)
+        var totalDeleted = 0
+        for (store in candidateStores()) {
+            try {
+                val deleted = store.wipeAll(ns)
+                totalDeleted += deleted
+                activeStoreId = store.storeId
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (!isLocal(store)) cooldowns[store.storeId] = now() + config.storeCooldownMs
+            }
+        }
+        totalDeleted
+    }
 
     private fun namespace(projectId: String?): String =
         projectId?.takeIf { it.isNotBlank() }?.let { "project_$it" } ?: DEFAULT_NAMESPACE

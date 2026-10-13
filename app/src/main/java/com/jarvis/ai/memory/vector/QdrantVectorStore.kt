@@ -272,6 +272,24 @@ class QdrantVectorStore(
         return -1
     }
 
+    override suspend fun wipeAll(namespace: String): Int = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(
+            QdrantDeleteAllWrapper.serializer(),
+            QdrantDeleteAll(namespace = namespace)
+        )
+        val request = Request.Builder()
+            .url("${baseUrl()}/collections/$COLLECTION/points/delete?wait=true")
+            .header("api-key", apiKey())
+            .post(body.toRequestBody(jsonContentType))
+            .build()
+        executeWithRetry(request).let { (code, _) ->
+            if (!code.isSuccess()) {
+                throw VectorStoreException(code, StoreHttpStatus.categoryFor(code), "qdrant wipeAll HTTP $code")
+            }
+        }
+        -1 // Qdrant does not report a count for wipeAll
+    }
+
     /** Executes with bounded exponential-backoff retries for transient IO failures. */
     private suspend fun executeWithRetry(request: Request): Pair<Int, String> {
         var lastError: IOException? = null
@@ -295,6 +313,12 @@ class QdrantVectorStore(
 
     @kotlinx.serialization.Serializable
     internal data class QdrantFilterWrapper(val filter: QdrantFilter)
+
+    @kotlinx.serialization.Serializable
+    internal data class QdrantDeleteAll(val namespace: String)
+
+    @kotlinx.serialization.Serializable
+    internal data class QdrantDeleteAllWrapper(val namespace: String)
 
     companion object {
         const val COLLECTION = "jarvis_memory"

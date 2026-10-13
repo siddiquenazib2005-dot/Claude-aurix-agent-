@@ -330,6 +330,15 @@ class PineconeVectorStore(
         -1 // Pinecone does not report a count for filtered deletes
     }
 
+    override suspend fun wipeAll(namespace: String): Int = withContext(Dispatchers.IO) {
+        val payload: String = json.encodeToString(DeleteAll.serializer(), DeleteAll(namespace = ns(namespace), deleteAllFlag = true))
+        val (code, _) = handleCall { dataPlane("/vectors/delete", namespace, payload) }
+        if (code !in 200..299) {
+            throw VectorStoreException(code, FailureCategory.SERVER, "wipeAll HTTP $code")
+        }
+        -1 // Pinecone does not report a count for wipeAll
+    }
+
     suspend fun healthCheck(): ProviderStatusDto {
         return try {
             val (code, _) = call(
