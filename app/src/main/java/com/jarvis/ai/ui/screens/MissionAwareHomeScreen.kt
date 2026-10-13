@@ -61,13 +61,21 @@ fun MissionAwareHomeScreen(
     }
     val progress by MissionEngine.progress.collectAsState()
     var feedback by rememberSaveable { mutableStateOf("") }
+    // Saved-routine count for the HUD systems grid. Re-read when the running
+    // state changes (a save/delete lands around runs, never mid-frame).
+    val savedMissionCount = remember(progress) {
+        runCatching { missionEngine.all().size }.getOrDefault(0)
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AurixVoiceHomeScreen(
+        JarvisHudHomeScreen(
             viewModel = viewModel,
+            missionProgress = progress,
+            savedMissionCount = savedMissionCount,
             onOpenChat = onOpenChat,
             onOpenMissions = onOpenMissions,
-            onOpenSettings = onOpenSettings
+            onOpenSettings = onOpenSettings,
+            onCommand = { viewModel.send(it) }
         )
 
         if (progress.isActive) {
