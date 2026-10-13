@@ -90,7 +90,7 @@ class JarvisApiClient(
         val request = buildRequest(history, systemPrompt, apiKey, stream = true)
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IOException(providerError(response, uplinkError(response.code)))
+                throw IOException(providerError(response, uplinkError(response, response.code)))
             }
             if (response.header("Content-Type").orEmpty()
                 .contains(JSON_MEDIA_TYPE, ignoreCase = true)
@@ -127,7 +127,7 @@ class JarvisApiClient(
         val request = buildRequest(history, systemPrompt, apiKey, stream = false)
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IOException(providerError(response, uplinkError(response.code)))
+                throw IOException(providerError(response, uplinkError(response, response.code)))
             }
             val body = response.body?.string() ?: throw IOException("Uplink returned no data.")
             val decoded = runCatching {
@@ -163,6 +163,29 @@ class JarvisApiClient(
         apiKey: String,
         stream: Boolean
     ): Request {
+        val effectiveUrl = baseUrl.trimEnd('/')
+        if (!effectiveUrl.contains("://") || effectiveUrl.startsWith("https://")) {
+            // Allow: HTTPS URLs may carry Bearer auth
+        } else if (effectiveUrl.startsWith("http://")) {
+            throw IllegalArgumentException(
+                "HTTP (non-TLS) base URL rejected: bearers not sent over clear-text endpoints. " +
+                "Configure an HTTPS base URL in Settings."
+            )
+        }
+        // Per-endpoint rate-limit: one bucket per base URL
+        val bucket = rateLimiter[effectiveUrl] ?: run {
+            val b = RateBucket()
+            rateLimiter[effectiveUrl] = b
+            b
+        }
+        val (allowed, waitMs) = bucket.check()
+        if (!allowed) {
+            throw IOException(
+                "Rate limited — retry after ${waitMs}ms. " +
+                "See Retry-After header from last 429 response."
+            )
+        }
+
         val payload = json.encodeToString(
             ChatCompletionRequest.serializer(),
             ChatCompletionRequest(
@@ -172,7 +195,7 @@ class JarvisApiClient(
             )
         )
         return Request.Builder()
-            .url(baseUrl.trimEnd('/') + "/chat/completions")
+            .url(effectiveUrl + "/chat/completions")
             .header("Authorization", "Bearer $apiKey")
             .header("Accept", "text/event-stream")
             .post(payload.toRequestBody(JSON_MEDIA_TYPE.toMediaType()))
@@ -205,17 +228,56 @@ class JarvisApiClient(
             }
         }
 
-    private fun uplinkError(code: Int): String = when (code) {
+    private fun uplinkError(response: Response?, code: Int): String = when (code) {
         401 -> "Authentication rejected by uplink (HTTP 401). API key invalid."
-        402 -> "Payment required by provider (HTTP 402)."
+        402 -> "Payment required by provider (HTTP 402). Key lacks this model."
         403 -> "Access forbidden (HTTP 403). Key lacks access to this model."
         404 -> "Endpoint not found (HTTP 404). Check base URL in Settings."
-        429 -> "Rate limited by provider (HTTP 429). Try again shortly."
+        429 -> {
+            // Rate limited — extract Retry-After if present, otherwise default.
+            val retryStr = response?.header("Retry-After") ?: "0"
+            var retrySec = retryStr.toIntOrNull() ?: 0
+            // NaN guard: clamp to [1, 3600] seconds.
+            if (retrySec < 1) retrySec = 1
+            if (retrySec > 3600) retrySec = 3600
+            "Rate limited by provider (HTTP 429). Retry-After ${retrySec}s. Back off and retry."
+        }
         else -> "Uplink fault (HTTP $code)."
     }
 
     companion object {
         private const val JSON_MEDIA_TYPE = "application/json"
+
+        /** Per-base-url rate-limit bucket with NaN guard and Retry-After support. */
+        private val rateLimiter = synchronized(this) {
+            mutableMapOf<String, RateBucket>()
+        }
+
+        private data class RateBucket(
+            var remaining: Int = 5,
+            var resetMs: Long = System.currentTimeMillis(),
+            var retryAfter: Int = 0
+        )
+
+        private fun RateBucket.check(): Pair<Boolean, Long> {
+            val now = System.currentTimeMillis()
+            if (now >= resetMs) {
+                // Refill bucket
+                remaining = 5
+                resetMs = now + 60000 // 1-min window
+            }
+            if (remaining > 0) {
+                remaining--
+                return true to 0L
+            }
+            // Exhausted — return retryAfter if set, else 60s default
+            val wait = retryAfter.coerceIn(1, 3600) * 1000L
+            return false to wait
+        }
+
+        private fun RateBucket.recordRetryAfter(headers: Map<String, String?>) {
+            retryAfter = headers["Retry-After"]?.toIntOrNull() ?: 0
+        }
 
         private val SHARED_CLIENT: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
